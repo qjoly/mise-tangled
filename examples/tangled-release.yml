@@ -1,0 +1,105 @@
+# Publishes one sh.tangled.repo.artifact record per built binary on every v* tag.
+# Copy to .tangled/workflows/release.yml in your repo, fill in the four YOUR-* values
+# (owner DID, repo record key and repo DID come from sh.tangled.repo.listRepos), and set
+# ATP_APP_PASSWORD under Settings -> Secrets.
+#
+# The tag must be annotated: an artifact record points at a tag object.
+# The identity signing the records must be the repo owner or a collaborator.
+when:
+  - event: ["push"]
+    tag: ["v*"]
+
+engine: microvm
+image: nixos
+
+registry:
+  nixpkgs: github:nixos/nixpkgs/nixos-unstable
+
+dependencies:
+  - go
+  - git
+  - curl
+  - jq
+  - coreutils
+
+steps:
+  - name: "Build the release binaries"
+    command: |
+      set -euo pipefail
+      mkdir -p dist
+      for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+        os=${target%/*}
+        arch=${target#*/}
+        echo "building $os/$arch"
+        CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+          go build -trimpath -ldflags "-s -w" \
+          -o "dist/mytool-${TANGLED_REF_NAME}-${os}-${arch}" .
+      done
+      ls -l dist
+
+  - name: "Publish the artifact records"
+    command: |
+      set -euo pipefail
+
+      # Identity that signs the records. It has to be the repo owner or a collaborator,
+      # otherwise mise-tangled refuses the artifacts on install.
+      PDS="https://YOUR-PDS"
+      ATP_IDENTIFIER="YOUR-HANDLE"
+
+      # Repo record key is `mytool` while the repo is displayed as `Notary`, and the repo has
+      # its own DID. Both come from sh.tangled.repo.listRepos.
+      REPO_AT_URI="at://YOUR-OWNER-DID/sh.tangled.repo/YOUR-REPO-RECORD-KEY"
+      REPO_DID="YOUR-REPO-DID"
+
+      session=$(curl -fsS -X POST "$PDS/xrpc/com.atproto.server.createSession" \
+        -H "Content-Type: application/json" \
+        -d "{\"identifier\":\"$ATP_IDENTIFIER\",\"password\":\"$ATP_APP_PASSWORD\"}")
+      jwt=$(echo "$session" | jq -r .accessJwt)
+      did=$(echo "$session" | jq -r .did)
+
+      # Artifacts hang off the tag object, which only an annotated tag has.
+      tag_hash=$(git rev-parse "${TANGLED_REF_NAME}^{tag}" 2>/dev/null) || {
+        echo "no tag object for ${TANGLED_REF_NAME}, artifacts need an annotated tag: git tag -a"
+        exit 1
+      }
+      # The record wants the 20 raw bytes of the hash, base64 encoded.
+      tag_bytes=$(printf '%s' "$tag_hash" | tr 'a-f' 'A-F' | basenc --base16 -d | basenc --base64 | tr -d '=')
+      echo "tag object $tag_hash"
+
+      for path in dist/*; do
+        name=$(basename "$path")
+        echo "uploading $name"
+        blob=$(curl -fsS -X POST "$PDS/xrpc/com.atproto.repo.uploadBlob" \
+          -H "Authorization: Bearer $jwt" \
+          -H "Content-Type: application/octet-stream" \
+          --data-binary @"$path")
+
+        record=$(jq -n \
+          --arg did "$did" \
+          --arg tag "$tag_bytes" \
+          --arg name "$name" \
+          --arg repo "$REPO_AT_URI" \
+          --arg repoDid "$REPO_DID" \
+          --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --argjson blob "$(echo "$blob" | jq .blob)" '{
+            repo: $did,
+            collection: "sh.tangled.repo.artifact",
+            validate: false,
+            record: {
+              "$type": "sh.tangled.repo.artifact",
+              tag: {"$bytes": $tag},
+              name: $name,
+              repo: $repo,
+              repoDid: $repoDid,
+              artifact: $blob,
+              createdAt: $created
+            }
+          }')
+
+        curl -fsS -X POST "$PDS/xrpc/com.atproto.repo.createRecord" \
+          -H "Authorization: Bearer $jwt" \
+          -H "Content-Type: application/json" \
+          -d "$record" >/dev/null
+      done
+
+      echo "published $(ls dist | wc -l) artifacts for $TANGLED_REF_NAME"

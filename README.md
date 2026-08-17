@@ -76,6 +76,18 @@ and checks it after download, so nobody has to publish a checksum file next to t
 CID has any other shape, or if no `sha256sum` or `shasum` is available, the install stops instead
 of accepting unverified bytes.
 
+## Publishing artifacts from tangled CI
+
+[`examples/tangled-release.yml`](examples/tangled-release.yml) is a working workflow: it
+cross compiles a Go binary for four platforms on every `v*` tag, uploads each one with
+`com.atproto.repo.uploadBlob` and creates one artifact record per file. Three things matter for
+this plugin to find them:
+
+- the tag has to be annotated (`git tag -a`), since a record points at a tag object
+- the identity signing the records has to be the repo owner or a collaborator
+- put the OS and the architecture in the file name, separated by `-`, `_` or `.`, as in
+  `mytool-v1.2.0-linux-amd64`, and no `asset` option is needed
+
 ## Caveats
 
 - The lexicon caps an artifact at 50 MB, so publish large binaries compressed.
