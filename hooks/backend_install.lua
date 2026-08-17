@@ -33,8 +33,9 @@ function PLUGIN:BackendInstall(ctx)
 
     local cmd = require("cmd")
     local file = require("file")
-    cmd.exec("mkdir -p " .. install_path)
-    local downloaded = file.join_path(ctx.download_path or install_path, item.value.name)
+    local download_dir = ctx.download_path or install_path
+    cmd.exec("mkdir -p " .. Tangled.quote(download_dir))
+    local downloaded = file.join_path(download_dir, item.value.name)
 
     Tangled.download(item, downloaded)
     Tangled.place(downloaded, item.value.name, install_path, tool, options)

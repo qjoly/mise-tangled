@@ -119,6 +119,8 @@ local function shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
+Tangled.quote = shell_quote
+
 --- `$bytes` of a record field (standard or url-safe base64) to a hex string.
 function Tangled.bytes_to_hex(b64)
     local clean = b64:gsub("-", "+"):gsub("_", "/"):gsub("=", "")
@@ -221,13 +223,11 @@ function Tangled.tags(tool, options)
     return tags
 end
 
---- Every artifact of the repo, aggregated by the appview across uploader PDSes.
-function Tangled.artifacts(repo, options)
-    local appview = opt(options, "appview", DEFAULT_APPVIEW)
-    local base = appview .. "/xrpc/sh.tangled.repo.listArtifacts?limit=100&subject=" .. repo.repo_did
+--- Pages through an appview list endpoint. Says so instead of truncating in silence.
+local function list_all(url_base)
     local items, cursor = {}, nil
     for _ = 1, MAX_PAGES do
-        local url = base
+        local url = url_base
         if cursor then
             url = url .. "&cursor=" .. cursor
         end
@@ -237,11 +237,51 @@ function Tangled.artifacts(repo, options)
         end
         local next_cursor = as_string(page.cursor)
         if not next_cursor or next_cursor == cursor then
-            break
+            return items
         end
         cursor = next_cursor
     end
+    require("log").warn("tangled: stopped paging after " .. #items .. " records, some may be missing")
     return items
+end
+
+--- DIDs whose artifacts are trusted: the owner, the repo itself and its collaborators.
+function Tangled.allowed_uploaders(repo, options)
+    local allowed = { [repo.did] = true, [repo.repo_did] = true }
+    local appview = opt(options, "appview", DEFAULT_APPVIEW)
+    local url = appview .. "/xrpc/sh.tangled.repo.listCollaborators?limit=100&subject=" .. repo.repo_did
+    for _, item in ipairs(list_all(url)) do
+        local subject = as_string((item.value or {}).subject)
+        if subject then
+            allowed[subject] = true
+        end
+    end
+    for did in tostring(opt(options, "allowed_uploaders", "")):gmatch("[^,%s]+") do
+        allowed[did] = true
+    end
+    return allowed
+end
+
+--- Anyone can attach a record to anyone's tag, so artifacts from unknown DIDs are dropped.
+function Tangled.filter_uploaders(items, allowed)
+    local log = require("log")
+    local kept = {}
+    for _, item in ipairs(items) do
+        local uploader = tostring(item.uri or ""):match("^at://([^/]+)/")
+        if uploader and allowed[uploader] then
+            kept[#kept + 1] = item
+        else
+            log.debug("tangled: ignoring artifact published by " .. tostring(uploader))
+        end
+    end
+    return kept
+end
+
+--- Every artifact of the repo, aggregated by the appview across uploader PDSes.
+function Tangled.artifacts(repo, options)
+    local appview = opt(options, "appview", DEFAULT_APPVIEW)
+    local url = appview .. "/xrpc/sh.tangled.repo.listArtifacts?limit=100&subject=" .. repo.repo_did
+    return Tangled.filter_uploaders(list_all(url), Tangled.allowed_uploaders(repo, options))
 end
 
 --- Hex tag-object hashes carrying an artifact, as a lookup set.
@@ -256,15 +296,26 @@ function Tangled.tagged_hashes(items)
     return hashes
 end
 
+--- mise strips one brace pair when templating mise.toml, so both forms are accepted.
+--- The replacement goes through a function: a `%` in a tag name is not a capture reference.
+local function fill(template, key, value)
+    return (template:gsub("{{?%s*" .. key .. "%s*}}?", function()
+        return value
+    end))
+end
+
 function Tangled.render(template, version)
-    local os_name = RUNTIME.osType
-    local arch = RUNTIME.archType
-    return (
-        template
-            :gsub("{{%s*version%s*}}", version)
-            :gsub("{{%s*os%s*}}", os_name)
-            :gsub("{{%s*arch%s*}}", arch)
-    )
+    local out = fill(template, "version", version)
+    out = fill(out, "os", RUNTIME.osType)
+    return fill(out, "arch", RUNTIME.archType)
+end
+
+--- An artifact name ends up in a filesystem path, so only a bare file name is accepted.
+local function safe_name(name)
+    if type(name) ~= "string" or name == "" or name:find("[/\\]") or name:sub(1, 1) == "." then
+        error("refusing artifact with unsafe name " .. tostring(name))
+    end
+    return name
 end
 
 --- Picks the artifact to install: explicit `asset` option, else os/arch matching.
@@ -274,6 +325,7 @@ function Tangled.pick(items, tag_hash, version, options)
         local value = item.value or {}
         local raw = value.tag and value.tag["$bytes"]
         if raw and Tangled.bytes_to_hex(raw) == tag_hash then
+            safe_name(value.name)
             candidates[#candidates + 1] = item
         end
     end
@@ -327,24 +379,21 @@ function Tangled.pick(items, tag_hash, version, options)
     return matches[1]
 end
 
+--- Every failure here is fatal: skipping the check would install unverified bytes.
 function Tangled.verify(path, cid)
-    local log = require("log")
     local expected = Tangled.cid_sha256(cid)
     if not expected then
-        log.warn("tangled: unexpected CID shape " .. cid .. ", skipping checksum")
-        return
+        error("unsupported CID shape " .. cid .. ", refusing to install unverified bytes")
     end
     local cmd = require("cmd")
     local quoted = shell_quote(path)
     local ok, out = pcall(cmd.exec, "sha256sum " .. quoted .. " 2>/dev/null || shasum -a 256 " .. quoted)
     if not ok then
-        log.warn("tangled: no sha256 tool available, skipping checksum")
-        return
+        error("no sha256 tool available (sha256sum or shasum), cannot verify " .. path)
     end
     local got = tostring(out):match("%x%x%x%x%x%x%x%x+")
     if not got then
-        log.warn("tangled: could not read sha256 output, skipping checksum")
-        return
+        error("could not read sha256 output for " .. path)
     end
     if got:lower() ~= expected then
         error("checksum mismatch: expected " .. expected .. ", got " .. got)
@@ -391,7 +440,7 @@ function Tangled.place(downloaded, artifact_name, install_path, tool, options)
     cmd.exec("rm -f " .. shell_quote(downloaded))
 
     -- Archives usually wrap everything in a single top-level directory: unwrap it.
-    -- ponytail: breaks if that directory name has spaces, switch to file.list if it ever happens
+    -- ponytail: a newline in that directory name breaks the count, switch to file.list if it happens
     local root = strings.trim_space(tostring(cmd.exec(
         "cd "
             .. shell_quote(extract_dir)

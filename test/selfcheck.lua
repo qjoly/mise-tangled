@@ -11,7 +11,8 @@ package.preload["cmd"] = function()
     }
 end
 package.preload["log"] = function()
-    return { info = function() end, warn = function() end }
+    local quiet = function() end
+    return { trace = quiet, debug = quiet, info = quiet, warn = quiet, error = quiet }
 end
 dofile("metadata.lua")
 
@@ -36,6 +37,8 @@ assert(owner == "did:plc:wshs7t2adsemcrrd4snkeqli", "parse did/repo")
 assert(not pcall(Tangled.parse, "core"), "parse rejects a bare repo")
 
 assert(Tangled.render("app-v{{version}}-{{arch}}-{{os}}", "1.2.0") == "app-v1.2.0-amd64-linux", "render")
+assert(Tangled.render("app-v{version}-{arch}-{os}", "1.2.0") == "app-v1.2.0-amd64-linux", "render single braces")
+assert(Tangled.render("app-{version}", "1.0%1") == "app-1.0%1", "a % in the version is literal")
 
 local function artifact(name, tag)
     return { uri = "at://did:plc:x/sh.tangled.repo.artifact/1", value = { name = name, tag = { ["$bytes"] = tag } } }
@@ -58,6 +61,25 @@ assert(not pcall(Tangled.pick, items, HASH, "1.2.0", { asset = "nope" }), "unkno
 
 RUNTIME.archType = "riscv64"
 assert(not pcall(Tangled.pick, items, HASH, "1.2.0", {}), "no artifact for this platform errors")
+RUNTIME.archType = "amd64"
+
+-- An artifact name reaching the filesystem must not escape the download directory.
+for _, evil in ipairs({ "../../../../tmp/pwn-linux-amd64", "sub/dir-linux-amd64", ".bashrc-linux-amd64" }) do
+    assert(not pcall(Tangled.pick, { artifact(evil, TAG) }, HASH, "1.2.0", {}), "rejects name " .. evil)
+end
+
+-- Artifacts from a DID that owns neither the repo nor a collaborator seat are dropped.
+local function from(did, name)
+    return { uri = "at://" .. did .. "/sh.tangled.repo.artifact/1", value = { name = name } }
+end
+local allowed = { ["did:plc:owner"] = true, ["did:plc:mate"] = true }
+local kept = Tangled.filter_uploaders({
+    from("did:plc:owner", "a"),
+    from("did:plc:stranger", "b"),
+    from("did:plc:mate", "c"),
+}, allowed)
+assert(#kept == 2 and kept[1].value.name == "a" and kept[2].value.name == "c", "keeps owner and collaborator")
+assert(#Tangled.filter_uploaders({ { uri = "garbage", value = {} } }, allowed) == 0, "drops an unparsable uri")
 
 -- A file whose bytes do not match the CID must be rejected.
 local tmp = os.tmpname()
@@ -68,8 +90,10 @@ assert(
     not pcall(Tangled.verify, tmp, "bafkreicqg6ut7ttjfrk4yscwm4jxbkdlqvuivvad4g4oxvh4wl5t5567nm"),
     "checksum mismatch is fatal"
 )
--- An unknown CID shape only warns, it must not block the install.
-assert(pcall(Tangled.verify, tmp, "Qmfoo"), "unknown CID shape is tolerated")
+-- A CID we cannot read a sha256 from must stop the install, not downgrade to a warning.
+for _, cid in ipairs({ "Qmfoo", "k2jmtxx8tc9pv6f9ubqf3eqjqhz1lxwu4kb0c5", "zdj7WkRPAX9o9nb9zPbXzwG7JEs" }) do
+    assert(not pcall(Tangled.verify, tmp, cid), "unverifiable CID is fatal: " .. cid)
+end
 os.remove(tmp)
 
 print("selfcheck ok")

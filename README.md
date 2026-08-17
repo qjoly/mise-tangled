@@ -30,14 +30,18 @@ The plugin picks the artifact on its own when the file name contains the OS and 
 
 ```toml
 [tools]
-"tangled:tangled.org/core" = { version = "1.2.0-alpha", asset = "appview-v{{version}}-x86_64-linux", bin = "appview" }
+"tangled:tangled.org/core" = { version = "1.2.0-alpha", asset = "appview-v{version}-x86_64-linux", bin = "appview" }
 ```
+
+Use single braces in `mise.toml`: mise renders the file as a template first and eats one brace
+pair. Both `{version}` and `{{version}}` are accepted, so either form works.
 
 ### Options
 
 | Option | Default | Purpose |
 |---|---|---|
-| `asset` | auto by os/arch | artifact name, templated with `{{version}}`, `{{os}}`, `{{arch}}` |
+| `asset` | auto by os/arch | artifact name, templated with `{version}`, `{os}`, `{arch}` |
+| `allowed_uploaders` | none | extra DIDs whose artifacts are trusted, comma separated |
 | `bin` | repo name | binary name in `bin/` (single-file artifacts only) |
 | `appview` | `https://api.tangled.org` | appview XRPC host |
 | `resolver` | `https://slingshot.microcosm.blue` | handle -> DID resolver |
@@ -57,15 +61,25 @@ Self-hosted knot:
 3. `sh.tangled.repo.listArtifacts` -> artifacts of every uploader, filtered on the tag hash
 4. `com.atproto.sync.getBlob` on the uploader's PDS -> the bytes
 
+## Who is trusted
+
+An artifact record lives in the uploader's own PDS, and nothing stops a stranger from attaching
+one to your tag. The appview aggregates them all, so the plugin keeps only the artifacts whose
+uploader is the repo owner, the repo DID itself, or a collaborator listed by
+`sh.tangled.repo.listCollaborators`. Add other DIDs with the `allowed_uploaders` option if you
+know what you are trusting.
+
 The blob CID is a CIDv1 `raw` + `sha2-256`. The plugin reads the expected sha256 out of the CID
-and checks it after download, so nobody has to publish a checksum file next to the binary.
+and checks it after download, so nobody has to publish a checksum file next to the binary. If the
+CID has any other shape, or if no `sha256sum` or `shasum` is available, the install stops instead
+of accepting unverified bytes.
 
 ## Caveats
 
 - The lexicon caps an artifact at 50 MB, so publish large binaries compressed.
 - Tags must be annotated. Artifacts point at a tag object, and a lightweight tag creates none.
 - `mise ls-remote` hides prereleases, so `1.2.0-alpha` style tags only show up on explicit install.
-- Requires `git` in `PATH`.
+- Requires `git` and a sha256 tool in `PATH`. Windows is not supported yet.
 
 ## Development
 
