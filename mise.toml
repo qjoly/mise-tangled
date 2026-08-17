@@ -1,0 +1,10 @@
+[tools]
+lua = "5.4"
+
+[tasks.test]
+description = "Offline self-check of the plugin helpers"
+run = "lua test/selfcheck.lua"
+
+[tasks.link]
+description = "Link this plugin into mise and clear the cache"
+run = ["mise plugin link --force tangled .", "mise cache clear"]
