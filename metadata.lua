@@ -1,6 +1,6 @@
 PLUGIN = { -- luacheck: ignore
     name = "tangled",
-    version = "0.0.1",
+    version = "0.0.2",
     description = "Install binaries attached to tangled tags (atproto artifacts)",
     author = "qjoly",
     homepage = "https://github.com/qjoly/mise-tangled",
@@ -216,14 +216,57 @@ function Tangled.resolve_pds(did)
     error("no #atproto_pds service in DID document of " .. did)
 end
 
+--- Pages through an appview list endpoint. Says so instead of truncating in silence.
+local function list_all(url_base)
+    local items, cursor = {}, nil
+    for _ = 1, MAX_PAGES do
+        local url = url_base
+        if cursor then
+            url = url .. "&cursor=" .. cursor
+        end
+        local page = get_json(url)
+        for _, item in ipairs(as_table(page.items)) do
+            items[#items + 1] = item
+        end
+        local next_cursor = as_string(page.cursor)
+        if not next_cursor or next_cursor == cursor then
+            return items
+        end
+        cursor = next_cursor
+    end
+    require("log").warn("tangled: stopped paging after " .. #items .. " records, some may be missing")
+    return items
+end
+
+--- The record key of a repo is not its name: `Notary` lives under the key `notary`, and a
+--- forked repo under a TID. So the repo is looked up by name or by key, exact match first.
+function Tangled.match_repo(items, repo)
+    local wanted = repo:lower()
+    local fuzzy
+    for _, item in ipairs(items) do
+        local value = as_table(item.value)
+        local rkey = tostring(item.uri or ""):match("([^/]+)$") or ""
+        local name = as_string(value.name) or ""
+        if name == repo or rkey == repo then
+            return value
+        end
+        if not fuzzy and (name:lower() == wanted or rkey:lower() == wanted) then
+            fuzzy = value
+        end
+    end
+    return fuzzy
+end
+
 --- Repo record from the appview: gives us repoDid (artifact subject) and knot.
 function Tangled.get_repo(tool, options)
     local owner, repo = Tangled.parse(tool)
     local did = Tangled.resolve_did(owner, options)
     local appview = opt(options, "appview", DEFAULT_APPVIEW)
-    local url = appview .. "/xrpc/sh.tangled.repo.getRepo?repo=at://" .. did .. "/sh.tangled.repo/" .. repo
-    local record = get_json(url)
-    local value = as_table(record.value)
+    local url = appview .. "/xrpc/sh.tangled.repo.listRepos?limit=100&subject=" .. did
+    local value = Tangled.match_repo(list_all(url), repo)
+    if not value then
+        error("no repo named " .. repo .. " under " .. did)
+    end
     local repo_did = as_string(value.repoDid)
     if not repo_did then
         error("repo " .. tool .. " has no repoDid, it cannot hold artifacts")
@@ -255,28 +298,6 @@ function Tangled.tags(tool, options)
         error("no tags found in " .. url)
     end
     return tags
-end
-
---- Pages through an appview list endpoint. Says so instead of truncating in silence.
-local function list_all(url_base)
-    local items, cursor = {}, nil
-    for _ = 1, MAX_PAGES do
-        local url = url_base
-        if cursor then
-            url = url .. "&cursor=" .. cursor
-        end
-        local page = get_json(url)
-        for _, item in ipairs(as_table(page.items)) do
-            items[#items + 1] = item
-        end
-        local next_cursor = as_string(page.cursor)
-        if not next_cursor or next_cursor == cursor then
-            return items
-        end
-        cursor = next_cursor
-    end
-    require("log").warn("tangled: stopped paging after " .. #items .. " records, some may be missing")
-    return items
 end
 
 --- DIDs whose artifacts are trusted: the owner, the repo itself and its collaborators.

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.2
+
+- Resolve a repo by name or by record key instead of assuming the key is the name. `Notary` is
+  stored under the key `notary`, and a forked repo under a tid, so those were not found at all.
+
 ## 0.0.1
 
 First release. Installs a binary attached to a tangled tag as a mise tool:

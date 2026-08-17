@@ -107,6 +107,20 @@ assert(
     "an ambiguous match errors"
 )
 
+-- Real shape: the repo displayed as `Notary` is stored under the record key `notary`.
+local repos = {
+    { uri = "at://did:plc:o/sh.tangled.repo/gitops", value = { name = "GitOps", repoDid = "did:plc:g" } },
+    { uri = "at://did:plc:o/sh.tangled.repo/notary", value = { name = "Notary", repoDid = "did:plc:n" } },
+    { uri = "at://did:plc:o/sh.tangled.repo/vacua", value = { repoDid = "did:plc:v" } },
+    { uri = "at://did:plc:o/sh.tangled.repo/3liuighjy2h22", value = { name = "core", repoDid = "did:plc:c" } },
+}
+assert(Tangled.match_repo(repos, "Notary").repoDid == "did:plc:n", "match on the name")
+assert(Tangled.match_repo(repos, "notary").repoDid == "did:plc:n", "match on the record key")
+assert(Tangled.match_repo(repos, "NOTARY").repoDid == "did:plc:n", "match ignoring case")
+assert(Tangled.match_repo(repos, "vacua").repoDid == "did:plc:v", "match a repo with no name")
+assert(Tangled.match_repo(repos, "core").repoDid == "did:plc:c", "match a repo keyed by a tid")
+assert(Tangled.match_repo(repos, "absent") == nil, "no match returns nil")
+
 -- A null field arrives as userdata in mise, which is truthy: it must not crash the listing.
 local NULL = io.stdout
 assert(next(Tangled.tagged_hashes({ { value = NULL }, { value = { tag = NULL } } })) == nil, "null tag is skipped")
