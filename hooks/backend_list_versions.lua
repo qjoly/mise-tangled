@@ -13,9 +13,11 @@ function PLUGIN:BackendListVersions(ctx)
     local tagged = Tangled.tagged_hashes(Tangled.artifacts(repo, options))
 
     -- A tag with no artifact is not installable, so it is not a version.
-    local versions = {}
+    -- `v1.0` and `1.0` collapse to the same version, hence the dedup.
+    local versions, seen = {}, {}
     for _, tag in ipairs(tags) do
-        if tagged[tag.hash] then
+        if tagged[tag.hash] and not seen[tag.version] then
+            seen[tag.version] = true
             versions[#versions + 1] = tag.version
         end
     end
@@ -29,6 +31,8 @@ function PLUGIN:BackendListVersions(ctx)
     if ok then
         return { versions = sorted }
     end
+    -- Lexicographic order puts 1.10.0 before 1.9.0, so say it rather than pretend.
+    require("log").warn("tangled: tags of " .. tool .. " are not semver, falling back to alphabetical order")
     table.sort(versions)
     return { versions = versions }
 end

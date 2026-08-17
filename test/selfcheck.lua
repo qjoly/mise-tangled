@@ -10,11 +10,38 @@ package.preload["cmd"] = function()
         end,
     }
 end
+package.preload["file"] = function()
+    return {
+        join_path = function(...)
+            return table.concat({ ... }, "/")
+        end,
+        exists = function(p)
+            local fh = io.open(p, "r")
+            if fh then
+                fh:close()
+            end
+            return fh ~= nil
+        end,
+    }
+end
 package.preload["log"] = function()
     local quiet = function() end
     return { trace = quiet, debug = quiet, info = quiet, warn = quiet, error = quiet }
 end
 dofile("metadata.lua")
+
+-- Loading the hooks catches a syntax error or a renamed method, which mise would only
+-- surface at install time.
+for _, hook in ipairs({ "list_versions", "install", "exec_env" }) do
+    dofile("hooks/backend_" .. hook .. ".lua")
+end
+for _, method in ipairs({ "BackendListVersions", "BackendInstall", "BackendExecEnv" }) do
+    assert(type(PLUGIN[method]) == "function", "hook " .. method .. " is missing")
+end
+assert(PLUGIN.name == "tangled" and PLUGIN.version:match("^%d+%.%d+%.%d+$"), "plugin metadata")
+
+local env = PLUGIN:BackendExecEnv({ install_path = "/opt/x" })
+assert(env.env_vars[1].key == "PATH" and env.env_vars[1].value == "/opt/x/bin", "exec env exposes bin/")
 
 -- Real record: sh.tangled.repo.artifact tag bytes of tangled core v1.2.0-alpha
 assert(
@@ -29,6 +56,8 @@ assert(
     "CIDv1 -> sha256"
 )
 assert(Tangled.cid_sha256("Qmfoo") == nil, "CIDv0 is not decoded")
+-- dag-cbor instead of raw: same sha256 length, but not the digest of the blob bytes.
+assert(Tangled.cid_sha256("bafyreiha3nrxqnd2pmukig6y22rhfhdl3d6aksvqiirqjdegzov6gludzu") == nil, "raw codec only")
 
 local owner, repo = Tangled.parse("tangled.org/core")
 assert(owner == "tangled.org" and repo == "core", "parse handle/repo")
@@ -61,7 +90,27 @@ assert(not pcall(Tangled.pick, items, HASH, "1.2.0", { asset = "nope" }), "unkno
 
 RUNTIME.archType = "riscv64"
 assert(not pcall(Tangled.pick, items, HASH, "1.2.0", {}), "no artifact for this platform errors")
+
+-- An alias must not match inside a longer token: arm is not arm64, x86 is not x86_64.
+RUNTIME.archType = "arm"
+assert(not pcall(Tangled.pick, { artifact("tool-linux-arm64", TAG) }, HASH, "1", {}), "arm does not match arm64")
+RUNTIME.archType = "386"
+assert(not pcall(Tangled.pick, { artifact("tool-linux-x86_64", TAG) }, HASH, "1", {}), "386 does not match x86_64")
+assert(Tangled.pick({ artifact("tool-linux-i386", TAG) }, HASH, "1", {}), "i386 still matches")
 RUNTIME.archType = "amd64"
+assert(Tangled.pick({ artifact("tool_linux_x86_64", TAG) }, HASH, "1", {}), "underscores separate tokens")
+assert(Tangled.pick({ artifact("tool.linux.amd64.bin", TAG) }, HASH, "1", {}), "dots separate tokens")
+
+-- Two artifacts of the same name length: refuse rather than pick one at random.
+assert(
+    not pcall(Tangled.pick, { artifact("tool-linux-amd64", TAG), artifact("evil-linux-amd64", TAG) }, HASH, "1", {}),
+    "an ambiguous match errors"
+)
+
+-- A null field arrives as userdata in mise, which is truthy: it must not crash the listing.
+local NULL = io.stdout
+assert(next(Tangled.tagged_hashes({ { value = NULL }, { value = { tag = NULL } } })) == nil, "null tag is skipped")
+assert(#Tangled.tagged_hashes({}) == 0, "no artifact means no hash")
 
 -- An artifact name reaching the filesystem must not escape the download directory.
 for _, evil in ipairs({ "../../../../tmp/pwn-linux-amd64", "sub/dir-linux-amd64", ".bashrc-linux-amd64" }) do

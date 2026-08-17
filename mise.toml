@@ -1,9 +1,22 @@
 [tools]
 lua = "5.4"
+stylua = "latest"
 
 [tasks.test]
-description = "Offline self-check of the plugin helpers"
+description = "Offline self-check of the plugin helpers and hooks"
 run = "lua test/selfcheck.lua"
+
+[tasks.integration]
+description = "Install a real artifact from tangled (needs network)"
+run = "./test/integration.sh"
+
+[tasks.lint]
+description = "Check Lua formatting"
+run = "stylua --check metadata.lua hooks test"
+
+[tasks.fmt]
+description = "Format Lua files"
+run = "stylua metadata.lua hooks test"
 
 [tasks.link]
 description = "Link this plugin into mise and clear the cache"

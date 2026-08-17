@@ -1,5 +1,7 @@
 # mise-tangled
 
+[![ci](https://github.com/qjoly/mise-tangled/actions/workflows/ci.yml/badge.svg)](https://github.com/qjoly/mise-tangled/actions/workflows/ci.yml)
+
 A [mise](https://mise.jdx.dev) backend plugin that installs binaries attached to
 [tangled](https://tangled.org) tags.
 
@@ -84,10 +86,14 @@ of accepting unverified bytes.
 ## Development
 
 ```bash
-lua test/selfcheck.lua      # offline checks on parsing, artifact matching, CID decoding
-mise plugin link --force tangled .
-mise cache clear
+mise run test          # offline: parsing, artifact matching, CID decoding, hooks load
+mise run lint          # stylua
+mise run link          # link the plugin into mise and clear its cache
+mise run integration   # installs a real artifact from tangled, needs network
 ```
+
+CI runs `test` on Linux and macOS, `lint`, and `integration` as a non-blocking job since it
+depends on the appview being reachable.
 
 ## License
 

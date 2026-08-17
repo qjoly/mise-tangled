@@ -16,12 +16,17 @@ function PLUGIN:BackendInstall(ctx)
     if not install_path or install_path == "" then
         error("install path cannot be empty")
     end
+    Tangled.assert_supported_os()
 
+    -- `v1.0` and `1.0` both yield the version 1.0, so an exact tag name wins over a stripped one.
     local tag_hash
     for _, tag in ipairs(Tangled.tags(tool, options)) do
-        if tag.version == version or tag.name == version then
+        if tag.name == version then
             tag_hash = tag.hash
             break
+        end
+        if tag.version == version and not tag_hash then
+            tag_hash = tag.hash
         end
     end
     if not tag_hash then

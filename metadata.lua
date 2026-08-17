@@ -1,6 +1,6 @@
 PLUGIN = { -- luacheck: ignore
     name = "tangled",
-    version = "0.1.0",
+    version = "0.0.1",
     description = "Install binaries attached to tangled tags (atproto artifacts)",
     author = "qjoly",
     homepage = "https://github.com/qjoly/mise-tangled",
@@ -31,19 +31,27 @@ local OS_ALIASES = {
 local ARCH_ALIASES = {
     amd64 = { "amd64", "x86_64", "x64" },
     arm64 = { "arm64", "aarch64" },
-    ["386"] = { "386", "i386", "x86" },
+    -- No bare `x86`: it is a prefix of `x86_64` and would claim 64 bit artifacts.
+    ["386"] = { "386", "i386" },
     arm = { "armv7", "armhf", "arm" },
 }
 
 local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 local B32 = "abcdefghijklmnopqrstuvwxyz234567"
 
---- JSON nulls come back as userdata: keep only real strings.
+--- JSON nulls come back as userdata, which is truthy: `v or {}` would not filter them.
 local function as_string(v)
     if type(v) == "string" and v ~= "" then
         return v
     end
     return nil
+end
+
+local function as_table(v)
+    if type(v) == "table" then
+        return v
+    end
+    return {}
 end
 
 local function opt(options, key, fallback)
@@ -61,8 +69,12 @@ local function get_json(url)
     if err then
         error("GET " .. url .. " failed: " .. tostring(err))
     end
+    if resp.status_code == 429 then
+        error("GET " .. url .. " is rate limited (HTTP 429), retry in a moment")
+    end
     if resp.status_code ~= 200 then
-        error("GET " .. url .. " returned HTTP " .. resp.status_code .. ": " .. tostring(resp.body))
+        -- An appview error page can be kilobytes of HTML: keep the terminal readable.
+        error("GET " .. url .. " returned HTTP " .. resp.status_code .. ": " .. tostring(resp.body):sub(1, 200))
     end
     return json.decode(resp.body)
 end
@@ -106,9 +118,27 @@ local function ends_with_any(name, suffixes)
     return nil
 end
 
+--- Plain substring matching would make `arm` match `arm64`, so a match only counts between
+--- separators. `-`, `_` and `.` separate, a digit or letter does not.
+local function has_token(haystack, token)
+    local from = 1
+    while true do
+        local s, e = haystack:find(token, from, true)
+        if not s then
+            return false
+        end
+        local before = s > 1 and haystack:sub(s - 1, s - 1) or ""
+        local after = haystack:sub(e + 1, e + 1)
+        if not before:match("%w") and not after:match("%w") then
+            return true
+        end
+        from = s + 1
+    end
+end
+
 local function contains_any(haystack, needles)
     for _, n in ipairs(needles) do
-        if haystack:find(n, 1, true) then
+        if has_token(haystack, n) then
             return true
         end
     end
@@ -136,8 +166,8 @@ function Tangled.cid_sha256(cid)
     if not ok or #bytes < 36 then
         return nil
     end
-    -- cidv1 | codec | multihash code 0x12 (sha2-256) | length 0x20
-    if bytes[1] ~= 0x01 or bytes[3] ~= 0x12 or bytes[4] ~= 0x20 then
+    -- cidv1 | codec 0x55 (raw) | multihash code 0x12 (sha2-256) | length 0x20
+    if bytes[1] ~= 0x01 or bytes[2] ~= 0x55 or bytes[3] ~= 0x12 or bytes[4] ~= 0x20 then
         return nil
     end
     return to_hex(bytes, 5, 36)
@@ -174,9 +204,13 @@ function Tangled.resolve_pds(did)
     else
         error("unsupported DID method: " .. did)
     end
-    for _, service in ipairs(doc.service or {}) do
-        if service.id == "#atproto_pds" or service.id == did .. "#atproto_pds" then
-            return service.serviceEndpoint
+    for _, service in ipairs(as_table(doc.service)) do
+        local endpoint = as_string(as_table(service).serviceEndpoint)
+        if endpoint and (service.id == "#atproto_pds" or service.id == did .. "#atproto_pds") then
+            if endpoint:sub(1, 8) ~= "https://" then
+                error("PDS of " .. did .. " is not https: " .. endpoint)
+            end
+            return endpoint
         end
     end
     error("no #atproto_pds service in DID document of " .. did)
@@ -189,7 +223,7 @@ function Tangled.get_repo(tool, options)
     local appview = opt(options, "appview", DEFAULT_APPVIEW)
     local url = appview .. "/xrpc/sh.tangled.repo.getRepo?repo=at://" .. did .. "/sh.tangled.repo/" .. repo
     local record = get_json(url)
-    local value = record.value or {}
+    local value = as_table(record.value)
     local repo_did = as_string(value.repoDid)
     if not repo_did then
         error("repo " .. tool .. " has no repoDid, it cannot hold artifacts")
@@ -232,7 +266,7 @@ local function list_all(url_base)
             url = url .. "&cursor=" .. cursor
         end
         local page = get_json(url)
-        for _, item in ipairs(page.items or {}) do
+        for _, item in ipairs(as_table(page.items)) do
             items[#items + 1] = item
         end
         local next_cursor = as_string(page.cursor)
@@ -251,7 +285,7 @@ function Tangled.allowed_uploaders(repo, options)
     local appview = opt(options, "appview", DEFAULT_APPVIEW)
     local url = appview .. "/xrpc/sh.tangled.repo.listCollaborators?limit=100&subject=" .. repo.repo_did
     for _, item in ipairs(list_all(url)) do
-        local subject = as_string((item.value or {}).subject)
+        local subject = as_string(as_table(item.value).subject)
         if subject then
             allowed[subject] = true
         end
@@ -288,9 +322,11 @@ end
 function Tangled.tagged_hashes(items)
     local hashes = {}
     for _, item in ipairs(items) do
-        local raw = item.value and item.value.tag and item.value.tag["$bytes"]
-        if raw then
-            hashes[Tangled.bytes_to_hex(raw)] = true
+        -- One malformed record must not take down the whole version listing.
+        local raw = as_string(as_table(as_table(item.value).tag)["$bytes"])
+        local ok, hex = pcall(Tangled.bytes_to_hex, raw or "")
+        if raw and ok then
+            hashes[hex] = true
         end
     end
     return hashes
@@ -322,8 +358,8 @@ end
 function Tangled.pick(items, tag_hash, version, options)
     local candidates = {}
     for _, item in ipairs(items) do
-        local value = item.value or {}
-        local raw = value.tag and value.tag["$bytes"]
+        local value = as_table(item.value)
+        local raw = as_string(as_table(value.tag)["$bytes"])
         if raw and Tangled.bytes_to_hex(raw) == tag_hash then
             safe_name(value.name)
             candidates[#candidates + 1] = item
@@ -355,7 +391,11 @@ function Tangled.pick(items, tag_hash, version, options)
     local matches = {}
     for _, item in ipairs(candidates) do
         local name = item.value.name:lower()
-        if not ends_with_any(name, IGNORED_SUFFIXES) and contains_any(name, os_names) and contains_any(name, arch_names) then
+        if
+            not ends_with_any(name, IGNORED_SUFFIXES)
+            and contains_any(name, os_names)
+            and contains_any(name, arch_names)
+        then
             matches[#matches + 1] = item
         end
     end
@@ -376,6 +416,20 @@ function Tangled.pick(items, tag_hash, version, options)
     table.sort(matches, function(a, b)
         return #a.value.name < #b.value.name
     end)
+    -- table.sort is not stable, so a tie would install whatever the appview listed first.
+    if #matches > 1 and #matches[1].value.name == #matches[2].value.name then
+        error(
+            "several artifacts match "
+                .. RUNTIME.osType
+                .. "/"
+                .. RUNTIME.archType
+                .. ": "
+                .. matches[1].value.name
+                .. ", "
+                .. matches[2].value.name
+                .. " (use the `asset` option to pick one)"
+        )
+    end
     return matches[1]
 end
 
@@ -407,7 +461,10 @@ function Tangled.download(item, dest)
     if not uploader then
         error("could not read uploader DID from " .. tostring(item.uri))
     end
-    local cid = item.value.artifact.ref["$link"]
+    local cid = as_string(as_table(as_table(as_table(item.value).artifact).ref)["$link"])
+    if not cid then
+        error("artifact " .. tostring(item.uri) .. " carries no blob reference")
+    end
     local pds = Tangled.resolve_pds(uploader)
     local url = pds .. "/xrpc/com.atproto.sync.getBlob?did=" .. uploader .. "&cid=" .. cid
     log.info("tangled: downloading " .. item.value.name .. " from " .. pds)
@@ -416,6 +473,13 @@ function Tangled.download(item, dest)
         error("failed to download " .. item.value.name .. ": " .. tostring(err))
     end
     Tangled.verify(dest, cid)
+end
+
+--- The install path shells out to POSIX tools, and a .exe would need renaming anyway.
+function Tangled.assert_supported_os()
+    if RUNTIME.osType == "windows" then
+        error("tangled: windows is not supported yet (the install path needs POSIX tools)")
+    end
 end
 
 --- Lays the artifact out as install_path/bin/<binary>, extracting archives.
@@ -441,12 +505,16 @@ function Tangled.place(downloaded, artifact_name, install_path, tool, options)
 
     -- Archives usually wrap everything in a single top-level directory: unwrap it.
     -- ponytail: a newline in that directory name breaks the count, switch to file.list if it happens
-    local root = strings.trim_space(tostring(cmd.exec(
-        "cd "
-            .. shell_quote(extract_dir)
-            .. ' && if [ "$(ls -1A | wc -l)" -eq 1 ] && [ -d "$(ls -1A)" ];'
-            .. ' then printf %s "$PWD/$(ls -1A)"; else printf %s "$PWD"; fi'
-    )))
+    local root = strings.trim_space(
+        tostring(
+            cmd.exec(
+                "cd "
+                    .. shell_quote(extract_dir)
+                    .. ' && if [ "$(ls -1A | wc -l)" -eq 1 ] && [ -d "$(ls -1A)" ];'
+                    .. ' then printf %s "$PWD/$(ls -1A)"; else printf %s "$PWD"; fi'
+            )
+        )
+    )
 
     -- A release that already ships bin/ keeps its layout, a bare binary goes to bin/.
     local dest = install_path
@@ -455,5 +523,6 @@ function Tangled.place(downloaded, artifact_name, install_path, tool, options)
     end
     cmd.exec("cp -R " .. shell_quote(root) .. "/. " .. shell_quote(dest) .. "/")
     cmd.exec("rm -rf " .. shell_quote(extract_dir))
-    cmd.exec("chmod -R +x " .. shell_quote(bin_dir))
+    -- Only the binaries directly in bin/, not the licences and libraries an archive may ship.
+    cmd.exec("find " .. shell_quote(bin_dir) .. " -maxdepth 1 -type f -exec chmod +x {} +")
 end
