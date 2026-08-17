@@ -1,5 +1,5 @@
 [tools]
-lua = "5.4"
+lua = "5.5.1"
 stylua = "latest"
 
 [tasks.test]
