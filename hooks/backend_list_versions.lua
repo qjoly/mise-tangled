@@ -1,4 +1,4 @@
---- Lists the tags of a tangled repo that actually carry an artifact.
+--- Lists the installable versions of a tangled repo.
 --- @param ctx {tool: string, options: table} tool = "<handle-or-did>/<repo>"
 --- @return {versions: string[]} ascending list of versions
 function PLUGIN:BackendListVersions(ctx)

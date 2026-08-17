@@ -244,7 +244,7 @@ function Tangled.artifacts(repo, options)
     return items
 end
 
---- Set of tag-object hashes that actually have an artifact attached.
+--- Hex tag-object hashes carrying an artifact, as a lookup set.
 function Tangled.tagged_hashes(items)
     local hashes = {}
     for _, item in ipairs(items) do
