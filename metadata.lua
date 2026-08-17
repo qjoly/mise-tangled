@@ -3,7 +3,7 @@ PLUGIN = { -- luacheck: ignore
     version = "0.1.0",
     description = "Install binaries attached to tangled tags (atproto artifacts)",
     author = "qjoly",
-    homepage = "https://tangled.org/qjoly.io/mise-tangled",
+    homepage = "https://github.com/qjoly/mise-tangled",
     license = "MIT",
     notes = {
         "Tool syntax: tangled:<handle-or-did>/<repo>, e.g. tangled:tangled.org/core",

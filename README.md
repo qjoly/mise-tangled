@@ -10,8 +10,10 @@ artifact attached to it and installs it.
 ## Install
 
 ```bash
-mise plugin install tangled https://tangled.org/qjoly.io/mise-tangled
+mise plugin install tangled https://github.com/qjoly/mise-tangled
 ```
+
+Source of truth is GitHub, mirrored on tangled.
 
 ## Usage
 
